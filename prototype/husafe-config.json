@@ -1,7 +1,0 @@
-{
-  "_说明": "Supabase 项目配置。anonKey 是公开密钥，放前端是安全的；安全性由数据库 RLS 保证。",
-  "_警告": "绝对不要在这里放 service_role / secret key —— 那个能绕过所有安全策略。",
-
-  "url": "https://dcfgupbfphqytoimtpxh.supabase.co",
-  "anonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRjZmd1cGJmcGhxeXRvaW10cHhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4OTAzNTUsImV4cCI6MjEwNTQ2NjM1NX0.pHgNdJAGyUqNE-GF1OG2c-r_maj6SUmQwzEDHUtGJfo"
-}
