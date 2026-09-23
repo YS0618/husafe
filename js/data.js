@@ -155,7 +155,11 @@ function seed() {
     onboarded: false,
     setupDone: false,           // 是否已完成「设置称呼」引导
 
-    me: { id: 'u1', nickname: '阿满', avatar: '🐻', cloudId: null },
+    me: { id: 'u1', nickname: '阿满', avatar: '🐻', cloudId: null,
+          // 用户是否在本机亲手改过自己的称呼/头像。
+          // 为 true 时，登录拉取【不能】用云端值覆盖它 —— 反而要把本地值推上云端。
+          // 否则「改完昵称 → 重新登录」会被云端的旧值打回去。
+          profileEdited: false },
     partner: { id: 'u2', nickname: '小鹿', avatar: '🦊', cloudId: null },
     couple: {
       id: 'c1',
@@ -254,6 +258,15 @@ function migrate(saved) {
   // 补齐云身份字段（老存档没有）
   if (!('cloudId' in s.me)) s.me.cloudId = null;
   if (!('cloudId' in s.partner)) s.partner.cloudId = null;
+
+  // 老存档没这个标记。已经改过称呼的（setupDone）视为"用户改过"，
+  // 避免他们升级后被云端的旧昵称打回去。
+  //
+  // ⚠️ 必须看【存档原始值】，不能看 s.me.profileEdited ——
+  //    上面合并默认值时已经把它填成 false 了，判断会失效。
+  if (!saved.me || typeof saved.me.profileEdited !== 'boolean') {
+    s.me.profileEdited = !!s.setupDone;
+  }
   // 绑定时间是否已从云端同步（老存档一律视为未同步，避免显示假天数）
   if (typeof s.couple.boundAtSynced !== 'boolean') s.couple.boundAtSynced = false;
 
