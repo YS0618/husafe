@@ -1593,10 +1593,13 @@ async function pullAndMerge() {
   const r = await HusafeSync.pullAll();
   if (!r.ok) { toast('同步失败：' + r.reason); return; }
 
-  if (r.me) {
-    if (r.me.nickname) state.me.nickname = r.me.nickname;
-    if (r.me.avatar) state.me.avatar = r.me.avatar;
-  }
+  // ⚠️ 这里【不要】再用 r.me 覆盖昵称头像！
+  //
+  //    pullAll() 返回的 me 是【云端那份】，如果本地是用户刚改过的，
+  //    在这里覆盖就等于把上面的 profileEdited 处理白白抵消掉 ——
+  //    表现就是「昵称和头像每次登录都变回原来的」。
+  //
+  //    昵称头像只在上面的 fetchMyProfile 那段处理一次，这里跳过。
   if (Array.isArray(r.records)) {
     // 服务端为准：同 id 覆盖；本地独有且未同步的保留
     const byId = {};
