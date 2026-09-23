@@ -19,8 +19,11 @@ const app = {
   detailId: null,
 };
 
-/** 版本号显示在状态栏，用来确认你打开的是不是最新代码 */
-const BUILD = 'v0.2';
+/**
+ * 版本号 —— 显示在「我的」页底部，用来确认你打开的是不是最新代码。
+ * 每次交付改一次，方便一眼判断浏览器有没有在用缓存的旧文件。
+ */
+const BUILD = 'v0.4';
 
 /* ==========================================================================
    工具
@@ -2263,14 +2266,24 @@ function startPolling(intervalMs) {
  * 和 pullAndMerge 的区别：这个不做「云端为空要不要上传」的询问，
  * 也不弹 toast —— 它每 15 秒跑一次，必须是无感的。
  */
+/**
+ * 只刷新账目数据，不打扰用户。
+ *
+ * ⚠️ 这是每 15 秒跑一次的轮询，必须做到「无变化时零打扰」：
+ *
+ *   1. 比对的签名只包含【用户看得见的内容】—— 不含 syncedAt / updatedAt
+ *      这类每次拉取都会变的字段，否则会永远判定为"有变化"。
+ *   2. 没变化就【不重绘、不提示】。
+ *   3. 只有出现「本机以前没有的记录」才提示一句；仅仅数据被刷新不提。
+ */
 async function refreshFromCloud() {
   if (typeof HusafeSync === 'undefined' || !HusafeSync.isOnline() || !HusafeSync.isSignedIn()) return;
 
   const r = await HusafeSync.pullAll();
   if (!r.ok) return;
 
-  const before = state.records.length;
   const beforeSig = recordsSignature(state.records);
+  const beforeGoalsSig = goalsSignature(state.goals);
 
   // 云端为准合并（同 id 覆盖；本地独有的保留，可能是还没推上去的）
   const byId = {};
@@ -2279,41 +2292,65 @@ async function refreshFromCloud() {
   const merged = Object.values(byId);
 
   const afterSig = recordsSignature(merged);
-  const goalsSig = goalsSignature(r.goals || []);
-  const goalsChanged = goalsSig !== goalsSignature(state.goals);
+  const afterGoalsSig = goalsSignature(
+    Array.isArray(r.goals)
+      ? (() => {
+          const gById = {};
+          for (const g of state.goals) gById[g.id] = g;
+          for (const g of r.goals) gById[g.id] = g;
+          return Object.values(gById).filter(g => !g.deletedAt);
+        })()
+      : state.goals
+  );
 
-  if (beforeSig !== afterSig || goalsChanged) {
-    state.records = merged;
+  const recordsChanged = beforeSig !== afterSig;
+  const goalsChanged = beforeGoalsSig !== afterGoalsSig;
 
-    // 目标同样合并（云端为准，本地独有的保留）
-    if (Array.isArray(r.goals)) {
-      const gById = {};
-      for (const g of state.goals) gById[g.id] = g;
-      for (const g of r.goals) gById[g.id] = g;
-      state.goals = Object.values(gById).filter(g => !g.deletedAt);
-    }
+  // 🔑 没有任何实际变化 → 什么都不做（不重绘、不提示）
+  if (!recordsChanged && !goalsChanged) return;
 
-    save();
-    render();
-    // 只有在真的有变化时才提示，避免每 15 秒打扰一次
-    if (goalsChanged && beforeSig === afterSig) toast('目标已更新 ☁️');
-    else if (merged.length > before) toast('TA 那边有新记录 💗');
-    else toast('账目已更新 ☁️');
+  state.records = merged;
+
+  if (Array.isArray(r.goals)) {
+    const gById = {};
+    for (const g of state.goals) gById[g.id] = g;
+    for (const g of r.goals) gById[g.id] = g;
+    state.goals = Object.values(gById).filter(g => !g.deletedAt);
+  }
+
+  save();
+  render();
+
+  // 只提示「真的多了一条以前没见过的」——
+  // 编辑、删除同步过来时静默刷新即可，用户自己会看到界面对了。
+  const knownIds = new Set(
+    beforeSig ? beforeSig.split('|').map(s => s.split(':')[0]) : []
+  );
+  const newcomers = merged.filter(r2 => !knownIds.has(r2.id) && !r2.deletedAt);
+  if (newcomers.length) {
+    toast(newcomers.length === 1 ? 'TA 记了一笔 💗' : `TA 记了 ${newcomers.length} 笔 💗`);
   }
 }
 
-/** 目标的签名，用来判断有没有变化（轮询每 15 秒跑一次，不能无脑重绘） */
-function goalsSignature(goals) {
-  return (goals || [])
-    .map(g => `${g.id}:${g.name}:${g.target}:${g.updatedAt || ''}:${g.deletedAt || ''}`)
+/**
+ * 账目的内容签名。
+ *
+ * ⚠️ 只包含用户看得见的内容。**不要加 updatedAt / syncedAt** ——
+ * 那些每次拉取都会变，会导致"永远认为有变化"，于是每 15 秒弹一次提示。
+ */
+function recordsSignature(recs) {
+  return (recs || [])
+    .filter(r => !r.deletedAt)
+    .map(r => `${r.id}:${r.amount}:${r.visibility}:${r.payerId}:${r.categoryId}:${r.date}:${r.type}:${r.goalId || ''}:${r.note || ''}`)
     .sort()
     .join('|');
 }
 
-/** 用 id+updatedAt+deletedAt 拼一个签名，用来判断数据有没有变化 */
-function recordsSignature(recs) {
-  return recs
-    .map(r => `${r.id}:${r.updatedAt || ''}:${r.deletedAt || ''}:${r.visibility}:${r.amount}`)
+/** 目标的内容签名（同样只看用户看得见的内容） */
+function goalsSignature(goals) {
+  return (goals || [])
+    .filter(g => !g.deletedAt)
+    .map(g => `${g.id}:${g.name}:${g.target}:${g.icon || ''}:${g.deadline || ''}`)
     .sort()
     .join('|');
 }
