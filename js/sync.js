@@ -587,6 +587,8 @@ const HusafeSync = (function () {
   let reconnectDelay = 1000;
   let heartbeatRef = 0;
   let realtimeAvailable = false;
+  // 连不上太多次就彻底放弃实时通道，只靠轮询（避免控制台刷满错误）
+  let rtDisabled = false;
 
   /** 有没有可用的实时通道（供界面显示状态） */
   function isRealtimeOn() { return realtimeAvailable; }
@@ -595,29 +597,49 @@ const HusafeSync = (function () {
   let realtimeAlive = false;
   function isRealtimeAlive() { return realtimeAlive; }
 
+  /**
+   * 实时通道的失败计数。
+   *
+   * ⚠️ 为什么需要它：Supabase Realtime 用的 wss 连接在国内网络下
+   *    经常被重置（ERR_CONNECTION_RESET）。如果失败后立刻重连，
+   *    控制台会刷满错误、也白耗流量。
+   *
+   *    连续失败到一定次数就【彻底停掉】，只靠 15 秒轮询 ——
+   *    功能完全不受影响，只是延迟从"秒级"变成"最多 15 秒"。
+   */
+  let rtFailures = 0;
+  const RT_MAX_FAILURES = 3;
+
   function subscribe(handler) {
     if (!online || !isSignedIn()) return { ok: false, reason: '未配置或未登录' };
     onRecordChange = handler;
+    rtFailures = 0;
+    rtDisabled = false;
     openSocket();
     return { ok: true };
   }
 
   function openSocket() {
+    if (rtDisabled) return;                    // 已经放弃实时，交给轮询
+    if (typeof WebSocket === 'undefined') { rtDisabled = true; return; }
     if (socket) { try { socket.close(); } catch (e) {} }
     const s = getSession();
     const wsUrl = cfg.url.replace(/^http/, 'ws') +
       '/realtime/v1/websocket?apikey=' + encodeURIComponent(cfg.anonKey) +
       '&vsn=1.0.0';
 
+    let opened = false;
+
     try {
       socket = new WebSocket(wsUrl);
     } catch (e) {
+      rtDisabled = true;
       realtimeAvailable = false;
       return;                                  // 轮询会兜住
     }
 
     socket.onopen = () => {
-      reconnectDelay = 1000;
+      opened = true;
       realtimeAvailable = true;
       // 加入 phoenix 频道（Supabase Realtime 的协议格式）
       try {
@@ -675,15 +697,35 @@ const HusafeSync = (function () {
     socket.onclose = () => {
       realtimeAvailable = false;
       realtimeAlive = false;
+      if (opened) rtFailures++;                // 连上过又断，也记一次
       scheduleReconnect();
     };
     socket.onerror = () => { /* onclose 会跟着触发 */ };
   }
 
+  /**
+   * 断了之后要不要重连。
+   *
+   * 连续失败 RT_MAX_FAILURES 次就彻底放弃实时通道 —— 只靠轮询。
+   * 这样控制台不会被 ERR_CONNECTION_RESET 刷屏，功能也不受影响。
+   */
   function scheduleReconnect() {
     clearInterval(heartbeat);
+    realtimeAvailable = false;
+
+    if (rtFailures >= RT_MAX_FAILURES) {
+      rtDisabled = true;
+      if (typeof console !== 'undefined' && console.info) {
+        console.info('[husafe] 实时通道连不上，已切换为「每 15 秒自动刷新」模式（功能不受影响）');
+      }
+      return;
+    }
+
     setTimeout(() => {
-      if (onRecordChange && online && isSignedIn()) openSocket();
+      if (onRecordChange && online && isSignedIn() && !rtDisabled) {
+        rtFailures++;
+        openSocket();
+      }
     }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 60000);   // 退避到最多 1 分钟
   }
