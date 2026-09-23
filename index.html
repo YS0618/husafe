@@ -29,7 +29,7 @@
   <div class="statusbar">
     <span id="sb-time">9:41</span>
     <span class="sb-right">
-      <span id="build-tag">v0.2</span>
+      <span id="build-tag">v0.4</span>
       <span>🔒 仅本机</span><span>▮▮▮</span>
     </span>
   </div>
@@ -52,6 +52,39 @@
 <script src="js/sync.js"></script>
 <script src="js/config.js"></script>
 <script src="js/app.js"></script>
+<script>
+  /* ------------------------------------------------------------------
+     缓存穿透（重要）
+     
+     GitHub Pages 给 .js 文件设了约 10 分钟的缓存，而且普通刷新
+     （甚至 Ctrl+Shift+R）有时也绕不过它。
+     结果就是：代码已经传到服务器了，浏览器却还在用旧版本 ——
+     表现为「改了代码但页面没变化」。
+     
+     这段在页面加载后立刻用带时间戳的地址重新取一次 app.js，
+     只为了校验版本。如果发现服务器版本更新，就自动重新加载页面
+     （带 ?v= 参数，强制走新文件）。
+     
+     整个过程最多发生一次，不会循环。
+     ------------------------------------------------------------------ */
+  (function freshBoot() {
+    if (location.search.indexOf('v=') >= 0) return;   // 已经带版本参数了，不再折腾
+    fetch('js/app.js?t=' + Date.now())
+      .then(function (r) { return r.text(); })
+      .then(function (code) {
+        var m = code.match(/BUILD = '(v[\d.]+)'/);
+        var remote = m ? m[1] : null;
+        var shown = document.getElementById('build-tag');
+        var local = shown ? shown.textContent.trim() : null;
+        // 服务器版本和页面上显示的不一样 → 说明用的是缓存，强制重载
+        if (remote && local && remote !== local) {
+          var u = location.pathname + '?v=' + Date.now();
+          location.replace(u);
+        }
+      })
+      .catch(function () { /* 离线或 file:// 打开，忽略 */ });
+  })();
+</script>
 <script>
   /* ------------------------------------------------------------------
      启动顺序很重要：
