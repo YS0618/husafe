@@ -803,19 +803,20 @@ const HusafeSync = (function () {
       // 精确取自己那一行（用 id 过滤），不依赖数组顺序
       const mineRows = await request(
         '/rest/v1/users?select=id,nickname,avatar,couple_id&id=eq.' + myId + '&limit=1');
-      const me = (Array.isArray(mineRows) ? mineRows[0] : mineRows) || null;
+      const self = (Array.isArray(mineRows) ? mineRows[0] : mineRows) || null;
 
-      // 兜底：万一按 id 过滤取不到（RLS / 触发器没跑），退回原来的查法
-      let self = me;
+      // ⚠️ 这里【不能】做"查不到就取第一行"的兜底 ——
+      //    那可能拿到对方的行，于是自己的昵称/头像被 TA 的值覆盖
+      //    （表现为「头像和昵称不随着登录更新」）。
+      //    查不到就老实返回失败，由调用方处理。
       if (!self) {
-        const rows = await request('/rest/v1/users?select=id,nickname,avatar,couple_id&limit=1');
-        self = (Array.isArray(rows) ? rows[0] : rows) || null;
+        return { ok: false, reason: '读不到你的用户资料，请检查 users 表的 RLS 策略' };
       }
 
-      if (self && self.couple_id) setCoupleId(self.couple_id);
+      if (self.couple_id) setCoupleId(self.couple_id);
 
       let partner = null;
-      if (self && self.couple_id) {
+      if (self.couple_id) {
         try {
           const mates = await request(
             '/rest/v1/users?select=id,nickname,avatar&couple_id=eq.' + self.couple_id);
@@ -825,9 +826,9 @@ const HusafeSync = (function () {
       }
 
       // 🔑 u1 永远是「我」，u2 永远是「TA」
-      setIdentityMap({ u1: self ? self.id : myId || null, u2: partner ? partner.id : null });
+      setIdentityMap({ u1: self.id, u2: partner ? partner.id : null });
 
-      return { ok: true, me: self || null, partner, coupleId: self ? self.couple_id : null };
+      return { ok: true, me: self, partner, coupleId: self.couple_id };
     } catch (e) {
       return { ok: false, reason: e.message };
     }
