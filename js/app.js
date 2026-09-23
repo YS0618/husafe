@@ -218,11 +218,43 @@ function screenHome() {
         <div class="budget-hint">${budgetHint(shared.total, budget, daysLeft)}</div>
       </div>` : ''}
 
+    ${privateCard()}
+
     <div class="section-label">最近账目</div>
     ${recent.length
       ? recent.map(r => recRow(r)).join('')
       : emptyState('🍡', '还没有账目哦', '记下第一笔，我们一起开始', '记一笔', 'open-add')}
   `;
+}
+
+/**
+ * 我这个月的私密开销汇总。
+ *
+ * 私密账目不进共同统计（这是设计），但用户仍然需要看到"我这个月自己花了多少"——
+ * 否则记了私账却在首页毫无反馈，会以为记账没生效。
+ *
+ * 只在真的有私密账目时显示，没记过就不占位置。
+ */
+function privateCard() {
+  const mine = monthlyStats(currentMonth(), 'mine');
+  if (!mine.count) return '';
+  return `
+    <div class="card">
+      <div class="card-title">
+        <span>🔒 我这个月的私密开销</span>
+        <span class="ct-link" data-action="go-stats-mine">看明细 ›</span>
+      </div>
+      <div class="hero-split">
+        <div class="hs-item">
+          <div class="hs-k">共 ${mine.count} 笔</div>
+          <div class="hs-v">¥${money(mine.total, false)}</div>
+        </div>
+        <div class="hs-item">
+          <div class="hs-k">这些不参与共同统计</div>
+          <div class="hs-v"></div>
+        </div>
+      </div>
+    </div>`;
 }
 
 function onboardCard() {
@@ -308,17 +340,22 @@ function screenRecords() {
   for (const r of all) (groups[r.date] = groups[r.date] || []).push(r);
   const dates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
 
-  // 账目页头部：本月列表里可见的支出之和。
-  // v0.3 之后"我们共享"就等于"共同开销"，两个口径合一，不再有两个数字打架。
-  const monthTotal = all
-    .filter(r => r.type === 'expense' && r.visibility === 'shared')
+  // 头部金额：跟着当前筛选走 —— 否则在「只有我」下会永远显示 0。
+  // all 已经按可见性筛选过（私密账目只有本人可见），这里再按当前筛选聚合。
+  const monthExpense = all
+    .filter(r => r.type === 'expense')
     .reduce((s, r) => s + r.amount, 0);
+
+  // 说清楚这个数字是什么口径，避免"首页和账目页数字不一样"的困惑
+  const scopeLabel = app.filter === 'all'
+    ? '本月合计'
+    : (app.filter === 'shared' ? '我们共' : '🔒 只有我');
 
   return `
     <div class="topbar">
       <div>
         <div class="tb-title">账目</div>
-        <div class="tb-sub">${monthLabel(app.month)} · 我们共 ¥${money(monthTotal, false)}</div>
+        <div class="tb-sub">${monthLabel(app.month)} · ${scopeLabel} ¥${money(monthExpense, false)}</div>
       </div>
       <div class="tb-actions">
         <button class="icon-btn" data-action="prev-month" aria-label="上个月">‹</button>
@@ -354,7 +391,9 @@ function chip(key, label) {
    ========================================================================== */
 
 function screenGoals() {
-  const goals = state.goals.filter(g => g.status !== 'archived');
+  // 🔑 排除软删除的（deletedAt）和已归档的（archived）——
+  //    少了 deletedAt 这个条件，删掉的目标还会留在列表里。
+  const goals = state.goals.filter(g => !g.deletedAt && g.status !== 'archived');
   const totalSaved = goals.reduce((s, g) => s + goalSaved(g.id), 0);
   const totalTarget = goals.reduce((s, g) => s + g.target, 0);
 
@@ -723,6 +762,7 @@ function screenMe() {
       </div>
       ${syncQueueRow()}
       ${syncErrorRow()}
+      ${uploadLocalRow()}
     </div>
 
     ${ledgerAuditCard()}
@@ -862,6 +902,26 @@ function syncQueueRow() {
       <div class="row-body">
         <div class="row-k">立即重试上传</div>
         <div class="row-sub">有 ${s.queueLength()} 笔还没推上云端，TA 现在还看不到</div>
+      </div>
+      <span class="row-arrow">›</span>
+    </div>`;
+}
+
+/**
+ * 手动把本机数据推上云端。
+ *
+ * 自动补传（登录时）失败时的兜底入口 —— 给用户一个"我自己点一下试试"的选择，
+ * 比让他对着"数据没同步"干等要好。
+ */
+function uploadLocalRow() {
+  const s = typeof HusafeSync !== 'undefined' ? HusafeSync : null;
+  if (!s || !s.isOnline() || !s.isSignedIn()) return '';
+  return `
+    <div class="row" data-action="upload-local">
+      <span class="row-ico">☁️</span>
+      <div class="row-body">
+        <div class="row-k">把本机数据推上云端</div>
+        <div class="row-sub">如果 TA 那边看不到你记的账，点这里强制同步一次</div>
       </div>
       <span class="row-arrow">›</span>
     </div>`;
@@ -1475,10 +1535,30 @@ async function pullAndMerge() {
   const prof = await HusafeSync.fetchMyProfile();
   if (prof.ok) {
     if (prof.me) {
-      if (prof.me.nickname) state.me.nickname = prof.me.nickname;
-      if (prof.me.avatar) state.me.avatar = prof.me.avatar;
+      // 🔑 「用户自己改的」优先于云端。
+      //
+      // 之前是无条件用云端值覆盖本地 —— 于是只要云端还是旧值
+      //（推送失败过、或用户改完称呼才登录），每次登录都会把昵称打回去。
+      // 表现就是「头像和昵称不随着登录更新」（其实是反方向被覆盖了）。
+      if (state.me.profileEdited) {
+        // 本地是用户亲手设的 → 把本地值推上去，别让云端覆盖
+        HusafeSync.updateProfile({
+          nickname: state.me.nickname,
+          avatar: state.me.avatar,
+        }).then(r => {
+          if (r.ok) {
+            state.me.profileEdited = false;   // 云端已对齐，之后可以正常拉取
+            save();
+          }
+        }).catch(() => {});
+      } else {
+        if (prof.me.nickname) state.me.nickname = prof.me.nickname;
+        if (prof.me.avatar) state.me.avatar = prof.me.avatar;
+      }
       state.me.cloudId = prof.me.id;
     }
+
+    // TA 的称呼只能从云端来（本机改不了对方的）
     if (prof.partner) {
       state.partner.cloudId = prof.partner.id;
       if (prof.partner.nickname) state.partner.nickname = prof.partner.nickname;
@@ -1772,6 +1852,7 @@ function runAction(actEl, t) {
 
     case 'go-goals': app.tab = 'goals'; render(); break;
     case 'go-stats': app.tab = 'stats'; render(); break;
+    case 'go-stats-mine': app.tab = 'stats'; app.statScope = 'mine'; render(); break;
     case 'go-me': app.tab = 'me'; render(); break;
 
     case 'open-goal': openGoalModal(); break;
@@ -1844,20 +1925,21 @@ function runAction(actEl, t) {
       state.partner.nickname = taName;
       state.partner.avatar = setupState.partner;
       state.setupDone = true;
+      // 🔑 标记"这是用户亲手设的"，登录拉取时不许被云端旧值覆盖
+      state.me.profileEdited = true;
       save();
       closeModal();
       render();
       toast(`好嘞，${meName} ✨`);
 
-      // 🔑 必须把昵称头像推到云端。
-      //    之前只写本地 → 下次登录时 fetchMyProfile 用云端的旧值覆盖，
-      //    表现就是「改了昵称，重新登录又变回去了」。
+      // 推到云端。推成功就清掉标记（之后可以正常从云端拉）。
       if (typeof HusafeSync !== 'undefined' && HusafeSync.isOnline() && HusafeSync.isSignedIn()) {
         HusafeSync.updateProfile({
           nickname: meName,
           avatar: setupState.me,
         }).then(r => {
-          if (!r.ok) console.warn('昵称同步失败（本地已保存）：', r.reason);
+          if (r.ok) { state.me.profileEdited = false; save(); }
+          else console.warn('昵称同步失败（本地已保存，下次登录会自动重推）：', r.reason);
         }).catch(err => console.warn('昵称同步异常：', err));
       }
       break;
@@ -1887,11 +1969,31 @@ function runAction(actEl, t) {
 
     case 'deposit': openDepositModal(actEl.dataset.goal); break;
     case 'save-deposit': {
-      const amount = Math.round(parseFloat($('#dep-amount')?.value || '0') * 100);
-      if (!amount || amount <= 0) { toast('输入存入金额呀'); break; }
-      const payer = $('#modal').dataset.payer || state.me.id;
-      const res = depositGoal(actEl.dataset.goal, amount, payer);
-      if (!res.ok) { toast((res.errors && res.errors[0]) || '存入失败'); break; }
+      const goalId = actEl.dataset.goal;
+      if (!goalId) { toast('找不到目标，刷新页面再试'); break; }
+      if (!state.goals.some(g => g.id === goalId)) {
+        toast('这个目标已经不在了（可能被删了）');
+        closeModal(); render();
+        break;
+      }
+
+      // 容错读取金额：原生 number input 在移动端输入法下可能给出奇怪的值
+      const raw = ($('#dep-amount')?.value || '').trim();
+      const parsed = parseFloat(raw);
+      const amount = Math.round((isFinite(parsed) ? parsed : 0) * 100);
+
+      if (!amount || amount <= 0) {
+        toast('先填一个大于 0 的金额');
+        $('#dep-amount')?.focus();
+        break;
+      }
+
+      const payer = ($('#modal')?.dataset.payer) || state.me.id;
+      const res = depositGoal(goalId, amount, payer);
+      if (!res || !res.ok) {
+        toast((res && res.errors && res.errors[0]) || '存入失败，请重试');
+        break;
+      }
       closeModal(); render(); toast(`存进去啦 · ¥${money(amount, false)} 🎉`);
       break;
     }
@@ -1922,8 +2024,51 @@ function runAction(actEl, t) {
               </div>
             </div>`).join('') : '<div class="muted tc">还没有存入记录</div>'}
         </div>
-        <button class="btn btn-secondary mt-4" data-action="close-modal">关闭</button>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" style="flex:1" data-action="close-modal">关闭</button>
+          <button class="btn btn-ghost" style="flex:0 0 auto;color:#C97B6B"
+                  data-action="ask-del-goal" data-goal="${g.id}">删除</button>
+        </div>
       `);
+      break;
+    }
+
+    case 'ask-del-goal': {
+      // 先弹二次确认 —— 删目标是不可逆操作，误点代价大
+      const g = state.goals.find(x => x.id === actEl.dataset.goal);
+      if (!g) { closeModal(); break; }
+      const saved = goalSaved(g.id);
+      const depCount = state.records.filter(r => !r.deletedAt && r.goalId === g.id).length;
+      openModal(`
+        <div class="modal-emoji">🗑️</div>
+        <div class="modal-title">删除「${esc(g.name)}」？</div>
+        <div class="modal-desc">
+          ${saved > 0
+            ? `已经攒了 <b>¥${money(saved, false)}</b>（${depCount} 笔存入）。`
+            : '这个目标还没有存过钱。'}
+        </div>
+        <div class="note mt-4" style="text-align:left">
+          ${saved > 0
+            ? '💡 目标删掉后，那些存入记录会<b>留在账目里</b>（它们本来就是共享账目），'
+              + '只是不再挂在目标上。'
+            : '💡 删掉后就找不回来了。'}
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" style="flex:1" data-action="close-modal">不删了</button>
+          <button class="btn btn-primary" style="flex:1;background:#C97B6B"
+                  data-action="del-goal" data-goal="${g.id}">确认删除</button>
+        </div>
+      `);
+      break;
+    }
+
+    case 'del-goal': {
+      const gid = actEl.dataset.goal;
+      const res = deleteGoal(gid);
+      if (!res.ok) { toast('删除失败，目标可能已经不在了'); closeModal(); render(); break; }
+      closeModal();
+      render();
+      toast('目标已删除');
       break;
     }
 
